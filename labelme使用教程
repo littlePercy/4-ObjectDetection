@@ -5,3 +5,6 @@ conda activate labelme
 conda install pyqt
 conda install pillow
 pip install labelme==3.16.2 -i https://pypi.tuna.tsinghua.edu.cn/simple
+
+# labelme 转 voc格式
+参考：https://blog.csdn.net/qq_41375318/article/details/109307288
