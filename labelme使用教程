@@ -1,0 +1,7 @@
+# 参考： https://blog.csdn.net/weixin_43427721/article/details/107122775
+conda create -n labelme python=3.6
+conda activate labelme
+安装的时候使用pip或者conda都可以，两者之中有一个不行时尝试使用另一个
+conda install pyqt
+conda install pillow
+pip install labelme==3.16.2 -i https://pypi.tuna.tsinghua.edu.cn/simple
