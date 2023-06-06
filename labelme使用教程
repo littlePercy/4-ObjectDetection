@@ -10,3 +10,6 @@ pip install labelme==3.16.2 -i https://pypi.tuna.tsinghua.edu.cn/simple
 参考：https://blog.csdn.net/qq_41375318/article/details/109307288
 # 转语义分割标签
 https://blog.csdn.net/qq1198768105/article/details/130204391
+
+# 打开labelme
+labelme --labels label.txt
