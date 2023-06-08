@@ -13,3 +13,6 @@ https://blog.csdn.net/qq1198768105/article/details/130204391
 
 # 打开labelme
 labelme --labels label.txt
+
+# 手把手教你使用YOLOV5训练自己的目标检测模型
+https://zhuanlan.zhihu.com/p/445604730
