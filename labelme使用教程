@@ -12,6 +12,7 @@ pip install labelme==3.16.2 -i https://pypi.tuna.tsinghua.edu.cn/simple
 https://blog.csdn.net/qq1198768105/article/details/130204391
 
 # 打开labelme
+# https://blog.csdn.net/qq_37541097/article/details/120162702
 labelme --labels label.txt
 
 # 手把手教你使用YOLOV5训练自己的目标检测模型
