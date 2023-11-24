@@ -1,0 +1,228 @@
+"""
+step1: (2048, 2048) -> (1, 3, 640, 640)
+"""
+from PIL import Image
+import numpy as np
+import cv2
+image_path = 'img/MAX_2-4050003.jpg'
+image = Image.open(image_path)
+image_shape = np.shape(image)[0:2]  # (2048, 2048)
+image = image.convert('RGB')  # 仅仅支持RGB图像的预测
+input_shape = [640, 640]
+letterbox_image = True
+confidence = 0.5
+nms_iou = 0.3
+
+
+def resize_image(image, size, letterbox_image):
+    iw, ih = image.size
+    w, h = size
+    if letterbox_image:
+        scale = min(w/iw, h/ih)
+        nw = int(iw*scale)
+        nh = int(ih*scale)
+
+        image = image.resize((nw, nh), Image.BICUBIC)
+        new_image = Image.new('RGB', size, (128, 128, 128))
+        new_image.paste(image, ((w-nw)//2, (h-nh)//2))
+    else:
+        new_image = image.resize((w, h), Image.BICUBIC)
+    return new_image
+
+
+def preprocess_input(image):
+    image /= 255.0
+    return image
+
+
+# (640, 640, 3)
+image_data = resize_image(image, (input_shape[1], input_shape[0]),
+                          letterbox_image)
+#   添加上batch_size维度 8bit/255 归一化
+image_data = np.expand_dims(np.transpose(preprocess_input
+                                         (np.array(image_data, dtype='float32')),
+                                         (2, 0, 1)), 0)
+
+
+#   获得类
+def get_classes(classes_path):
+    with open(classes_path, encoding='utf-8') as f:
+        class_names = f.readlines()
+    class_names = [c.strip() for c in class_names]
+    return class_names, len(class_names)
+
+
+#   获得先验框
+def get_anchors(anchors_path):
+    '''loads the anchors from a file'''
+    with open(anchors_path, encoding='utf-8') as f:
+        anchors = f.readline()
+    anchors = [float(x) for x in anchors.split(',')]
+    anchors = np.array(anchors).reshape(-1, 2)
+    return anchors, len(anchors)
+"""
+建立yolo模型，载入yolo模型的权重
+21 = 3*7
+7的内容为：x1, y1, x2, y2, obj_conf, class_conf, class_pred
+"""
+import torch
+import torch.nn as nn
+from nets.yolo import YoloBody
+images = torch.from_numpy(image_data).cuda()
+# ---------------------------------------------------#
+#   获得种类和先验框的数量
+# ---------------------------------------------------#
+class_names, num_classes = get_classes('model_data/nucleus_classes.txt')
+anchors, num_anchors = get_anchors('model_data/yolo_anchors.txt')
+anchors_mask = [[6, 7, 8], [3, 4, 5], [0, 1, 2]]
+net = YoloBody(anchors_mask, num_classes, 's',
+               backbone='cspdarknet', input_shape=[640, 640])
+net.load_state_dict(torch.load('logs/best_epoch_weights.pth', 'cuda'))
+net = net.eval()
+net = nn.DataParallel(net)
+net = net.cuda()
+print('{} model, and classes loaded.'.format('logs/best_epoch_weights.pth'))
+with torch.no_grad():
+    outputs = net(images)  # 长度为3的元组
+# [1, 21, 20, 20] [1, 21, 40, 40] [1, 21, 80, 80]
+"""
+网络输出结果解码
+[1, 21, 20, 20] => [1, 1200, 7]
+[1, 21, 40, 40] => [1, 4800, 7]
+[1, 21, 80, 80] => [1, 19200, 7]
+"""
+from utils.utils_bbox import DecodeBox
+bbox_util = DecodeBox(anchors, num_classes, (input_shape[0], input_shape[1]),
+                      anchors_mask)
+outputs = bbox_util.decode_box(outputs)
+
+# 将预测框进行堆叠，然后进行非极大抑制
+# results = bbox_util.non_max_suppression(torch.cat(outputs, 1),  # [1, 25200, 7]
+#                                         num_classes, input_shape,
+#                                         image_shape, letterbox_image,
+#                                         conf_thres=confidence,
+#                                         nms_thres=nms_iou)
+# top_label = np.array(results[0][:, 6], dtype='int32')  # array([0], dtype=int32)
+# top_conf = results[0][:, 4] * results[0][:, 5]
+# top_boxes = results[0][:, :4]
+
+"""
+step2: 将预测结果的格式转换成左上角右下角的格式
+"""
+from torchvision.ops import nms
+prediction = torch.cat(outputs, 1)
+box_corner = prediction.new(prediction.shape)
+box_corner[:, :, 0] = prediction[:, :, 0] - prediction[:, :, 2] / 2
+box_corner[:, :, 1] = prediction[:, :, 1] - prediction[:, :, 3] / 2
+box_corner[:, :, 2] = prediction[:, :, 0] + prediction[:, :, 2] / 2
+box_corner[:, :, 3] = prediction[:, :, 1] + prediction[:, :, 3] / 2
+prediction[:, :, :4] = box_corner[:, :, :4]  # [1, 25200, 7]
+output = [None for _ in range(len(prediction))]
+for i, image_pred in enumerate(prediction):  # i=0 [25200, 7]
+    #   对种类预测部分取max。
+    #   class_conf  [num_anchors, 1]    种类置信度
+    #   class_pred  [num_anchors, 1]    种类
+    class_conf, class_pred = torch.max(image_pred[:, 5:5 + num_classes], 1,
+                                       keepdim=True)
+    #   利用置信度进行第一轮筛选
+    # ----------------------------------------------------------#
+    conf_thres = 0.5
+    conf_mask = (image_pred[:, 4] * class_conf[:, 0] >= conf_thres).squeeze()
+    # 目标置信度*分类置信度 结果25200个False or True
+    # 根据置信度进行预测结果的筛选
+    # ----------------------------------------------------------#
+    image_pred = image_pred[conf_mask]  # [25200, 7] -> [6, 7] 6为有效anchor
+    class_conf = class_conf[conf_mask]  # [25200, 1] -> [6, 1]
+    class_pred = class_pred[conf_mask]  # [25200, 1] -> [6, 1]
+    """
+    !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+    需要考虑没有检测出目标的情况
+    if not image_pred.size(0):
+        continue
+    """
+    # [6, 7] 7的内容为：x1, y1, x2, y2, obj_conf, class_conf, class_pred
+    detections = torch.cat((image_pred[:, :5], class_conf.float(), class_pred.float()), 1)
+    #   获得预测结果中包含的所有种类
+    unique_labels = detections[:, -1].cpu().unique()
+    if prediction.is_cuda:
+        unique_labels = unique_labels.cuda()
+        detections = detections.cuda()
+    for c in unique_labels:
+        #   获得某一类得分筛选后全部的预测结果
+        detections_class = detections[detections[:, -1] == c]
+        nms_thres = 0.3
+        """
+        keep = nms(
+            detections_class[:, :4],
+            detections_class[:, 4] * detections_class[:, 5],
+            nms_thres
+        )
+        max_detections = detections_class[keep]
+        """
+        dets = detections_class[:, :4]  # 目标框
+        x1 = dets[:, 0].cpu().numpy()
+        y1 = dets[:, 1].cpu().numpy()
+        x2 = dets[:, 2].cpu().numpy()
+        y2 = dets[:, 3].cpu().numpy()
+        areas = (x2 - x1 + (1/image_shape[0])) * (y2 - y1 + (1/image_shape[1]))  # 每一个候选框的面积
+        scores = detections_class[:, 4] * detections_class[:, 5]  # bbox打分
+        scores = scores.cpu().numpy()
+        order = scores.argsort()[::-1]  # 打分从大到小排列，取index
+        keep = []   # keep为最后保留的边框
+        while order.size > 0:
+            j = order[0]  # order[0]是当前分数最大的窗口，肯定保留
+            keep.append(j)
+            # 计算边界框的交集
+            xx1 = np.maximum(x1[j], x1[order[1:]])
+            yy1 = np.maximum(y1[j], y1[order[1:]])
+            xx2 = np.minimum(x2[j], x2[order[1:]])
+            yy2 = np.minimum(y2[j], y2[order[1:]])
+            w = np.maximum(0.0, xx2 - xx1 + (1/image_shape[0]))
+            h = np.maximum(0.0, yy2 - yy1 + (1/image_shape[1]))
+            inter = w * h
+            # 计算IoU
+            ovr = inter / (areas[j] + areas[order[1:]] - inter)
+            # 保留IoU小于阈值的边界框
+            inds = np.where(ovr <= nms_thres)[0]
+            order = order[inds + 1]  # +1因为索引未考虑 order[0]
+        max_detections = detections_class[keep]
+        output[i] = max_detections if output[i] is None else torch.cat((output[i], max_detections))
+    if output[i] is not None:
+        output[i] = output[i].cpu().numpy()
+        box = output[i][..., 0:4]
+        boxes = box * np.concatenate([image_shape, image_shape], axis=-1)
+        output[i][:, :4] = boxes
+        # 图像坐标系(x1,y1,x2,y2)
+
+"""
+step3 筛选：只输出得分最大的0类
+"""
+import matplotlib.pyplot as plt
+plt.imshow(image)
+if output[0] is not None:
+    top_label = np.array(output[0][:, 6], dtype='int32')  # array([0], dtype=int32)
+    top_conf = output[0][:, 4] * output[0][:, 5]
+    top_boxes = output[0][:, :4]
+    if 0 in top_label:
+        label_lst = list(top_label)
+        positions = [i for i in range(len(label_lst)) if label_lst[i] == 0]
+        confs = [top_conf[i] for i in range(len(label_lst)) if label_lst[i] == 0]
+        position_index = confs.index(max(confs))
+        predicted_class = class_names[int(top_label[position_index])]
+        box = top_boxes[position_index]
+        score = top_conf[position_index]
+        x1, y1, x2, y2 = box
+        x1 = max(0, np.floor(x1).astype('int32'))
+        y1 = max(0, np.floor(y1).astype('int32'))
+        x2 = min(image.size[1], np.floor(x2).astype('int32'))
+        y2 = min(image.size[0], np.floor(y2).astype('int32'))
+        w = x2-x1
+        h = y2-y1
+        print("检测到即将分裂的细胞位于", (x1, y1, x2, y2), "宽", w, "高", h)
+        ax = plt.gca()
+        ax.add_patch(plt.Rectangle((x1, y1), w, h, color="blue", fill=False, linewidth=3))
+    else:
+        print("未检测到即将分裂的细胞")
+else:
+    print("未检测到细胞")
+plt.show()
