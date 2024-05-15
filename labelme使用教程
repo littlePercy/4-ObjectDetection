@@ -17,3 +17,9 @@ labelme --labels label.txt
 
 # 手把手教你使用YOLOV5训练自己的目标检测模型
 https://zhuanlan.zhihu.com/p/445604730
+
+# yolov5_label.txt
+__ignore__
+_background_
+others
+Metaphase
